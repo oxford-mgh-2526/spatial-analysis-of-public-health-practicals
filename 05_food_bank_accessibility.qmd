@@ -110,7 +110,7 @@ TT_foodbanks <- TT_foodbanks %>%
   filter(operating_model != "Temporarily Closed") #remove centres that are currently closed
 ```
 
-Next, we derive the point locations from postcodes. Unfortunately, the approach below only allows 100 locations at a time to be converted.
+Next, we derive the point locations from postcodes. Unfortunately, the approach below only allows 100 locations at a time to be converte and the lat/lon will be a centroid of the postcode not the actual location of the distribution centre.
 
 The function `lapply` used in these code chunks applies a function over a list or vector. We are applying it to a list of postcodes.
 
@@ -121,15 +121,16 @@ TT_foodbanks1 <- TT_foodbanks[1:100, ]
 list <- as.list(unique(TT_foodbanks1$postcode))
 
 #foodbank locations
-#lat and long from postcodes
+#lat and long from postcodes using bulk postcode look up function - limited to 100
 pc_list <- list(postcodes = list)
 bulk_lookup_result <- bulk_postcode_lookup(pc_list)
 str(bulk_lookup_result[1])
 
-#postcode look up
+#postcode look up - extract 2nd element from the list
 bulk_list <- lapply(bulk_lookup_result, "[[", 2)
 
 TT_foodbank_location_points1 <-
+  # iterate over each element and extract the following into a dataframe
   map_dfr(bulk_list,
           `[`,
           c("postcode", "longitude", "latitude"))
@@ -551,7 +552,8 @@ Now we have the point location of Trussell centres, we can use the tmap package 
 TT_foodbank_location_points <- TT_foodbank_location_points %>%
   st_transform(., 27700) 
 
-#clips the point locations to be only within the shape file area - excludes food banks outside the boundary
+#spatially subset (select) the point locations to be only within the shape file area - excludes food banks outside the boundary
+# defaults to st_intersects
 TT_foodbank_location_points <- TT_foodbank_location_points[UK_border,] 
 
 #plot map
@@ -808,7 +810,7 @@ Oxford_map <-
 Oxford_map
 ```
 
-Examining this data informs us that there are more food banks in the area than simply Trussell centres. However, before
+Give Food is an open access database with information on food banks in the UK. Next, load the food bank data with addresses (from Give Food). However, these are **food banks** (and could under represent the sites) and not distribution centres.
 
 ```{r map all food banks}
 #change mode from interactive to static
@@ -1017,7 +1019,7 @@ Oxford_map_LSOAs <-
 Oxford_map_LSOAs
 ```
 
-By mapping food bank centres are the LSOA scale rather than the LA scale, we can assume that they are usually located in more densely populated areas like towns/villages in the area.
+By mapping food bank centres at the LSOA scale rather than the LA scale, we can assume that they are usually located in more densely populated areas like towns/villages in the area.
 
 ```{r centroids of LSOAs}
 sf_use_s2(FALSE)
@@ -1047,6 +1049,18 @@ points_o <- points_o[,c("id","lon","lat")]
 #look at the data
 head(points_o,10)
 ```
+We now have a **choice to make** - what to use as a destination point, either:
+
+* Trussell Trust data
+  * We can filter distribution (access) points
+  * But we have taken postcodes and assigned a lat/lon to them
+  * The lat/lon will be a centroid of the postcode not the actual location of the distribution centre.
+  
+* Give food data
+  * Provided location, so assumed to be more accurate locations
+  * However, the points could be a mixture of food banks, distribution centres and even offices!
+  
+Here, I have used give food data.  
 
 ```{r create the destination points - centres}
 Oxford_give_food_foodbanks <- Oxford_give_food_foodbanks %>%
@@ -1066,6 +1080,27 @@ points_d <- points_d[,c("id","lon","lat")]
 
 #look at the data
 head(points_d,10)
+```
+If you look at the `ID` column it is now postcode, however might need this to be an LSOA. So we must use a [lookup table](https://open-geography-portalx-ons.hub.arcgis.com/datasets/ons::postcode-to-oa-2021-to-lsoa-to-msoa-to-lad-february-2025-best-fit-lookup-in-the-uk/about) to convert it back
+
+```{r}
+Lookup <- read_csv("prac5_data/PCD_OA21_LSOA21_MSOA21_LAD_FEB25_UK_LU.csv")
+
+# remove all spaces in postcode
+Lookup <- Lookup %>%
+  mutate(pcd7 = str_replace_all(pcd7, " ", ""))
+
+#join oxford walking time to food banks 
+#select only the postcode and LSOA from lookup
+# join on the postcode
+points_d <- points_d %>%
+  left_join(Lookup %>% select(pcd7, lsoa21cd), 
+            by = c("id" = "pcd7")) %>%
+  select(lsoa21cd, lon, lat, id)%>%
+  # must have an id
+    rename(postcode=id)%>%
+  rename(id=lsoa21cd)%>%
+  mutate(numeric_id=row_number())
 ```
 
 The next code chunk downloads the road network for the area. However, for this practical, it is included in the data provided (as is the timetable data for public transport).
@@ -1142,6 +1177,7 @@ mode <- c("TRANSIT")
 
 max_trip_duration <- 60 # minutes
 
+# can change to just a day (no time) and it will return min time of the entire day (to each Food bank within 60 mins)
 departure_datetime <- as.POSIXct("01-03-2021 14:00:00", 
                                  format = "%d-%m-%Y %H:%M:%S",
                                  tz = "Europe/London")
@@ -1174,22 +1210,7 @@ TTM_Oxford_walk <- travel_time_matrix(r5r_core,
                           max_trip_duration = max_trip_duration)
 ```
 
-If you look at the output you will see that the `from_id` column has changed from an LSOA to postcode. R5R has tried to help us here bu reducing the spatial size and snapping the origin to a lower spatial scale, however we need this to be an LSOA for mapping. So we must use a [lookup table](https://open-geography-portalx-ons.hub.arcgis.com/datasets/ons::postcode-to-oa-2021-to-lsoa-to-msoa-to-lad-february-2025-best-fit-lookup-in-the-uk/about) to convert it back
-
-```{r}
-Lookup <- st_read("prac5_data/PCD_OA21_LSOA21_MSOA21_LAD_FEB25_UK_LU.csv")
-
-Lookup <- Lookup %>%
-  mutate(pcd7 = str_replace_all(pcd7, " ", ""))
-
-TTM_Oxford_walk_mapped <- TTM_Oxford_walk %>%
-  left_join(Lookup %>% select(pcd7, lsoa21cd), 
-            by = c("from_id" = "pcd7")) %>%
-  rename(
-    from_postcode = from_id,  # keep the original postcode in a new column
-    from_id = lsoa21cd  # LSOA code becomes the new from_id
-  )
-```
+Now for Driving 
 
 ```{r driving travel times}
 # routing paramaters
@@ -1220,7 +1241,7 @@ Let's start with walking. This removes origin-destination pairs that have two or
 
 ```{r as some pairs have more than on value, lets select the minimum value}
 #select minimum value between pairs 
-TTM_Oxford_walk2 <- TTM_Oxford_walk_mapped %>%
+TTM_Oxford_walk2 <- TTM_Oxford_walk %>%
   group_by(to_id, from_id) %>% 
   slice_min(travel_time_p50, n = 1, with_ties = FALSE, na_rm = FALSE) %>%
   ungroup()
@@ -1277,11 +1298,12 @@ head(TTM_Oxford_PT3)
 
 ### Join to LSOAs
 
-Now we have the accessibility data in a usable form that we can join to our Oxford LSOAs data frame, we can calculate mean and minimum travel times for each LSOA for each mode of transport.
+Now we have the accessibility data in a usable form that we can join to our Oxford LSOAs data frame, we can calculate mean and minimum travel times for each LSOA for each mode of transport. R5R might find more than 1 food bank that is reachable for each centroid, so we can identify the minimum (and mean) travel time from the origin centroid.
 
 ```{r mean and min time from all OD pairs}
 
 TTM_Oxford_drive3 <- TTM_Oxford_drive3 %>%
+  # forces operation to happen row by row - find the smallest time in the row (not column)
   rowwise() %>%
   mutate(
     minimum_time_drive = min(c_across(2:14), na.rm = TRUE),
@@ -1339,7 +1361,7 @@ Oxford_LSOAs <- Oxford_LSOAs %>%
             by = "lsoa21cd")
 ```
 
-remove and inf values as these won't map
+remove any inf values as these won't map
 
 ```{r}
 Oxford_LSOAs <- Oxford_LSOAs %>%
@@ -1428,7 +1450,9 @@ In this last section we will examine two determinants of food bank use. Let's ta
 #Type of tenure of housing
 Tenure <- read_csv("prac5_data/Tenure.csv") %>%
   clean_names() %>%
+  # separate a single column into 2 by using : as the divider
   separate(lsoa21cd, c('lsoa_code', 'lsoa_name'), sep = ':') %>%
+  #trimws = remove white space before and after
   mutate(lsoa_name = trimws(lsoa_name)) %>%
   mutate(lsoa_code = trimws(lsoa_code)) 
 
@@ -1586,7 +1610,7 @@ Very simply, if we take the areas that are below the area average for social ren
 #set some parameters to identify which areas are under served
 Oxford_LSOAs <- Oxford_LSOAs %>%
   mutate(Underserved_areas = case_when
-         (social_rented >= 14.5 & disabled_under_the_equality_act >= 14.6 & mean_time_walk >= 32 ~ "Underserved", 
+         (social_rented >= 14.5 & disabled_under_the_equality_act >= 14.6 & mean_time_PT >= 32 ~ "Underserved", 
         TRUE ~ "Served"))
 ```
 
